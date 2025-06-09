@@ -1,48 +1,71 @@
-from pyspark.sql.functions import col, udf, lit, concat_ws
-from pyspark.sql.types import StringType
-from datetime import datetime
 import uuid
 
-# conversao de integer para strings legiveis do dynamodb
-def map_status(status_id):
-    return {
-        1: "todo",
-        2: "done",
-        3: "cancelled"
-    }.get(status_id, "unknown")
+from pyspark.sql.functions import (col, concat_ws, date_format, lit,
+                                   to_timestamp, udf)
+from pyspark.sql.types import StringType
 
-# aqui a gente registra como uma UDF (User Defined Function) para usar no PySpark com WithColumn
+
+def map_status(status_id):
+    return {1: "todo", 2: "done", 3: "cancelled"}.get(status_id, "unknown")
+
+
 map_status_udf = udf(map_status, StringType())
 
-def transform_dataframe(df):
-    #UUID unico pra cada item, ai e armazenado na coluna item_id
-    df = df.withColumn("item_id", udf(lambda: str(uuid.uuid4()), StringType())())
 
-    #gera a data hora atual no formato ISO, UTCNOW esta em depreciacao, estudar como substituir
-    now_iso = datetime.utcnow().isoformat()
-    #lit no pyspark insere um valor constante/fixo
-    df = df.withColumn("createdAt", lit(now_iso))
-
-    df = df.withColumn("date", col("Data de Conclusão").cast("timestamp"))
-    df = df.withColumn("date", col("date").cast("date").cast(StringType()))
-
-    #criacao pk e sk
-    df = df.withColumn("PK", concat_ws("", lit("USER#"), col("ID do Usuário")))
-    df = df.withColumn("SK", concat_ws("", lit("LIST#"), col("date"), lit("#ITEM#"), col("item_id")))
-
-    #ajuste dos nomes existentes na tabela de amostragem
-    df = df.withColumnRenamed("Nome da Tarefa", "name")
-    df = df.withColumnRenamed("Tipo da Tarefa", "tipo_tarefa")
-    df = df.withColumnRenamed("Tipo da Tarefa ID", "tipo_tarefa_id")
-    df = df.withColumnRenamed("Status", "status_id")  
-
-    #aqui a gente chama a funcao do map_status para a conversao do integer em texto
-    df = df.withColumn("status", map_status_udf(col("status_id")))  
-
-    # e aqui a gente filtra com os campos desejados no dataframe
-    df = df.select(
-        "PK", "SK", "item_id", "name", "status", "createdAt", "date",
-        "tipo_tarefa", "tipo_tarefa_id", "status_id"
+def _filter_valid_rows(df):
+    return df.filter(
+        (col("ID do Usuário") != "f9a533f2c78e4a09f87c9e68e442d3fe")
+        & (col("Status") != 3)
     )
 
-    return df
+
+def _normalize_dates(df):
+    df = df.withColumn(
+        "createdAt", to_timestamp(col("Data de criação"), "dd/MM/yyyy HH:mm:ss")
+    )
+    df = df.withColumn(
+        "createdAt", date_format(col("createdAt"), "yyyy-MM-dd'T'HH:mm:ss")
+    )
+    df = df.withColumn("date", col("Data de Conclusão").cast("timestamp"))
+    return df.withColumn("date", date_format(col("date"), "yyyy-MM-dd"))
+
+
+def generate_uuid():
+    return str(uuid.uuid4())
+
+
+generate_uuid_udf = udf(generate_uuid, StringType())
+
+
+def map_task_type(tipo):
+    return {"Tarefa a Ser Feita": "Task", "Item de Compra": "Shopping_Item"}.get(
+        tipo, "Unknown"
+    )
+
+
+map_task_type_udf = udf(map_task_type, StringType())
+
+
+def transform_dataframe(df):
+    new_user_sub = "73acaa5a-1071-704c-aa8e-fdcee0e21b64"
+    df = _filter_valid_rows(df)
+    df = df.withColumn("ID do Usuário", lit(new_user_sub))
+    df = df.withColumn("item_id", generate_uuid_udf())
+    df = _normalize_dates(df)
+    df = df.withColumn(
+        "PK", concat_ws("", lit("USER#"), col("ID do Usuário"))
+    ).withColumn(
+        "SK",
+        concat_ws("", lit("LIST#"), col("createdAt"), lit("#ITEM#"), col("item_id")),
+    )
+    df = (
+        df.withColumnRenamed("Nome da Tarefa", "name")
+        .withColumnRenamed("Tipo da Tarefa", "tipo_tarefa")
+        .withColumnRenamed("Status", "status_id")
+    )
+    df = df.withColumn("status", map_status_udf(col("status_id"))).withColumn(
+        "task_type", map_task_type_udf(col("tipo_tarefa"))
+    )
+    return df.select(
+        "PK", "SK", "item_id", "name", "status", "createdAt", "date", "task_type"
+    )
