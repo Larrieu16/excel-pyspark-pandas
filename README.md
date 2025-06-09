@@ -10,7 +10,6 @@ Este projeto realiza a importação de dados legados a partir de uma planilha Ex
 - Boto3 (opcional para integração com DynamoDB)
 - OpenPyXL
 
----
 
 ---
 
